@@ -28,7 +28,7 @@ const FLOOR_TARGET = "8〜12階";
 const ACCESS_TARGET = "神谷町駅または六本木一丁目駅まで35分以内";
 const LAYOUT_MIN = "1LDK以上";
 
-const SYSTEM_PROMPT = `あなたは不動産物件の評価AIです。Web検索を使って、SUUMOまたはLIFULL HOME'Sに掲載されている、以下の条件に合う新着・更新の賃貸物件情報を探してください。
+const SYSTEM_PROMPT = `あなたは不動産物件の評価AIです。web_searchツールを使って、SUUMOまたはLIFULL HOME'Sに掲載されている、以下の条件に合う新着・更新の賃貸物件情報を探してください。
 
 【検索エリア】
 ${AREAS.join("・")}
@@ -45,104 +45,111 @@ ${AREAS.join("・")}
 4. アクセス：${ACCESS_TARGET}（日比谷線・南北線沿線が有利）
 5. 間取り：${LAYOUT_MIN}
 
-【出力ルール】
-- 件数の上限は設けない。見つかった物件は全て評価する。
-- 物件が1件も見つからない場合は空配列 [] を返す。
-- 必ずJSON配列のみを出力する。前後の説明文や \`\`\` は一切付けない。
+スコアの目安: S=85点以上 / A=70〜84点 / B=50〜69点 / C=49点以下
 
-出力フォーマット:
-[
-  {
-    "name": "物件名",
-    "meta": "家賃X万円・X階・間取り・最寄り駅など簡潔に",
-    "rentNum": 12.5,
-    "score": 0から100の整数,
-    "rank": "S/A/B/C",
-    "url": "物件の参照URL（あれば。なければ空文字）",
-    "criteria": [
-      {"label":"夕陽","result":"ok/partial/ng/unknown"},
-      {"label":"階数","result":"ok/partial/ng/unknown"},
-      {"label":"家賃","result":"ok/partial/ng/unknown"},
-      {"label":"アクセス","result":"ok/partial/ng/unknown"},
-      {"label":"間取り","result":"ok/partial/ng/unknown"}
-    ],
-    "sunsetNote": "夕陽判定の根拠を一言で",
-    "reason": "100字程度の総評（良い点と気になる点）"
-  }
-]
+物件を全て評価し終えたら、最後に必ず report_properties ツールを呼び出して結果を報告してください。`;
 
-スコアの目安: S=85点以上 / A=70〜84点 / B=50〜69点 / C=49点以下`;
-
-function extractJsonArray(text) {
-  const start = text.indexOf("[");
-  if (start === -1) return null;
-  let depth = 0, inString = false, escape = false;
-  for (let i = start; i < text.length; i++) {
-    const c = text[i];
-    if (escape) { escape = false; continue; }
-    if (c === "\\" && inString) { escape = true; continue; }
-    if (c === '"') { inString = !inString; continue; }
-    if (inString) continue;
-    if (c === "[") depth++;
-    if (c === "]") { depth--; if (depth === 0) return text.slice(start, i + 1); }
-  }
-  return null;
-}
+const REPORT_TOOL = {
+  name: "report_properties",
+  description: "評価した物件一覧を報告する。物件検索・評価が完了したら必ずこのツールを呼ぶ。",
+  input_schema: {
+    type: "object",
+    properties: {
+      properties: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            name:       { type: "string" },
+            meta:       { type: "string" },
+            rentNum:    { type: "number" },
+            score:      { type: "integer" },
+            rank:       { type: "string", enum: ["S", "A", "B", "C"] },
+            url:        { type: "string" },
+            criteria: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  label:  { type: "string" },
+                  result: { type: "string", enum: ["ok", "partial", "ng", "unknown"] },
+                },
+                required: ["label", "result"],
+              },
+            },
+            sunsetNote: { type: "string" },
+            reason:     { type: "string" },
+          },
+          required: ["name", "score", "rank", "criteria"],
+        },
+      },
+    },
+    required: ["properties"],
+  },
+};
 
 const RANK_ICON = { S: "🟣", A: "🟢", B: "🟡", C: "⚪" };
 const RESULT_ICON = { ok: "✅", partial: "🔶", ng: "❌", unknown: "❔" };
 
 async function callClaude() {
-  const resp = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": ANTHROPIC_API_KEY,
-      "anthropic-version": "2023-06-01",
+  const messages = [
+    {
+      role: "user",
+      content: "上記の条件に合うSUUMO/LIFULL HOME'Sの新着・更新物件をWeb検索で探して、見つかった分だけ全件評価し、report_propertiesツールで報告してください。",
     },
-    body: JSON.stringify({
-      model: "claude-sonnet-4-6",
-      max_tokens: 4000,
-      system: SYSTEM_PROMPT,
-      tools: [{ type: "web_search_20250305", name: "web_search" }],
-      messages: [
-        {
-          role: "user",
-          content:
-            "上記の条件に合うSUUMO/LIFULL HOME'Sの新着・更新物件をWeb検索で探して、見つかった分だけ全件評価してください。",
-        },
-      ],
-    }),
-  });
+  ];
 
-  if (!resp.ok) {
-    const errText = await resp.text();
-    throw new Error(`Anthropic API error (${resp.status}): ${errText}`);
-  }
+  // Claude がすべてのツール呼び出し（web_search + report_properties）を完了するまでループ
+  while (true) {
+    const resp = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-6",
+        max_tokens: 4000,
+        system: SYSTEM_PROMPT,
+        tools: [{ type: "web_search_20250305", name: "web_search" }, REPORT_TOOL],
+        messages,
+      }),
+    });
 
-  const data = await resp.json();
-  const textBlocks = data.content
-    .filter((b) => b.type === "text")
-    .map((b) => b.text)
-    .join("");
+    if (!resp.ok) {
+      const errText = await resp.text();
+      throw new Error(`Anthropic API error (${resp.status}): ${errText}`);
+    }
 
-  let parsed;
-  try {
-    const clean = textBlocks.replace(/```json|```/g, "").trim();
-    parsed = JSON.parse(clean);
-  } catch {
-    const jsonStr = extractJsonArray(textBlocks);
-    if (jsonStr) {
-      parsed = JSON.parse(jsonStr);
-    } else {
-      throw new Error("JSON解析に失敗しました。応答内容:\n" + textBlocks.slice(0, 500));
+    const data = await resp.json();
+
+    // report_properties が呼ばれたら結果を返す
+    const reportBlock = data.content.find(
+      (b) => b.type === "tool_use" && b.name === "report_properties"
+    );
+    if (reportBlock) {
+      return reportBlock.input.properties || [];
+    }
+
+    // stop_reason が end_turn でツールなし → 物件なし
+    if (data.stop_reason === "end_turn") {
+      return [];
+    }
+
+    // tool_use が続く場合はメッセージを継続（web_search の結果を返す）
+    messages.push({ role: "assistant", content: data.content });
+    const toolResults = data.content
+      .filter((b) => b.type === "tool_use" && b.name !== "report_properties")
+      .map((b) => ({
+        type: "tool_result",
+        tool_use_id: b.id,
+        content: "",
+      }));
+    if (toolResults.length > 0) {
+      messages.push({ role: "user", content: toolResults });
     }
   }
-
-  if (!Array.isArray(parsed)) {
-    throw new Error("応答が配列形式ではありません");
-  }
-  return parsed;
 }
 
 function buildSlackMessage(properties) {
