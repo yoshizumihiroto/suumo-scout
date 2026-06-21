@@ -73,6 +73,22 @@ ${AREAS.join("・")}
 
 スコアの目安: S=85点以上 / A=70〜84点 / B=50〜69点 / C=49点以下`;
 
+function extractJsonArray(text) {
+  const start = text.indexOf("[");
+  if (start === -1) return null;
+  let depth = 0, inString = false, escape = false;
+  for (let i = start; i < text.length; i++) {
+    const c = text[i];
+    if (escape) { escape = false; continue; }
+    if (c === "\\" && inString) { escape = true; continue; }
+    if (c === '"') { inString = !inString; continue; }
+    if (inString) continue;
+    if (c === "[") depth++;
+    if (c === "]") { depth--; if (depth === 0) return text.slice(start, i + 1); }
+  }
+  return null;
+}
+
 const RANK_ICON = { S: "🟣", A: "🟢", B: "🟡", C: "⚪" };
 const RESULT_ICON = { ok: "✅", partial: "🔶", ng: "❌", unknown: "❔" };
 
@@ -115,9 +131,9 @@ async function callClaude() {
     const clean = textBlocks.replace(/```json|```/g, "").trim();
     parsed = JSON.parse(clean);
   } catch {
-    const match = textBlocks.match(/\[[\s\S]*\]/);
-    if (match) {
-      parsed = JSON.parse(match[0]);
+    const jsonStr = extractJsonArray(textBlocks);
+    if (jsonStr) {
+      parsed = JSON.parse(jsonStr);
     } else {
       throw new Error("JSON解析に失敗しました。応答内容:\n" + textBlocks.slice(0, 500));
     }
