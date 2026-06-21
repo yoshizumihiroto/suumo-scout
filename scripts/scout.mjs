@@ -99,8 +99,9 @@ async function callClaude() {
     },
   ];
 
-  // Claude がすべてのツール呼び出し（web_search + report_properties）を完了するまでループ
-  while (true) {
+  // web_search_20250305 はサーバーサイドで自動実行される。
+  // report_properties（クライアント側カスタムツール）が呼ばれるまで最大8ターン繰り返す。
+  for (let turn = 0; turn < 8; turn++) {
     const resp = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
@@ -110,7 +111,7 @@ async function callClaude() {
       },
       body: JSON.stringify({
         model: "claude-sonnet-4-6",
-        max_tokens: 4000,
+        max_tokens: 8000,
         system: SYSTEM_PROMPT,
         tools: [{ type: "web_search_20250305", name: "web_search" }, REPORT_TOOL],
         messages,
@@ -123,8 +124,9 @@ async function callClaude() {
     }
 
     const data = await resp.json();
+    console.log(`turn ${turn}: stop_reason=${data.stop_reason}, blocks=${data.content.map((b) => b.type).join(",")}`);
 
-    // report_properties が呼ばれたら結果を返す
+    // report_properties が呼ばれたら完了
     const reportBlock = data.content.find(
       (b) => b.type === "tool_use" && b.name === "report_properties"
     );
@@ -132,24 +134,34 @@ async function callClaude() {
       return reportBlock.input.properties || [];
     }
 
-    // stop_reason が end_turn でツールなし → 物件なし
+    // end_turn → 物件なし（report_properties が呼ばれなかった）
     if (data.stop_reason === "end_turn") {
+      const text = data.content.filter((b) => b.type === "text").map((b) => b.text).join("").slice(0, 300);
+      console.log("end_turn without report_properties. text:", text);
       return [];
     }
 
-    // tool_use が続く場合はメッセージを継続（web_search の結果を返す）
+    // tool_use の場合: web_search はサーバー処理済みのため tool_result は不要。
+    // アシスタントメッセージを追加して次のターンへ。
     messages.push({ role: "assistant", content: data.content });
-    const toolResults = data.content
-      .filter((b) => b.type === "tool_use" && b.name !== "report_properties")
-      .map((b) => ({
-        type: "tool_result",
-        tool_use_id: b.id,
-        content: "",
-      }));
-    if (toolResults.length > 0) {
-      messages.push({ role: "user", content: toolResults });
+
+    // web_search 以外のカスタムツール呼び出しがあればダミー結果を返す
+    const customTools = data.content.filter(
+      (b) => b.type === "tool_use" && b.name !== "web_search" && b.name !== "report_properties"
+    );
+    if (customTools.length > 0) {
+      messages.push({
+        role: "user",
+        content: customTools.map((b) => ({
+          type: "tool_result",
+          tool_use_id: b.id,
+          content: "OK",
+        })),
+      });
     }
   }
+
+  return [];
 }
 
 function buildSlackMessage(properties) {
